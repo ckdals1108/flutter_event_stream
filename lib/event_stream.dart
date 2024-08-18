@@ -5,7 +5,7 @@ import 'dart:convert';
 
 import 'package:event_stream/model/event_model.dart';
 import 'package:flutter/widgets.dart';
-import 'package:hive/hive.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 
@@ -35,7 +35,12 @@ class EventStream with WidgetsBindingObserver {
   // 이벤트 서버 통신용 큐
   final Queue<List<EventModel>> _streamQueue = Queue<List<EventModel>>();
 
-  void _init() {
+  void _init() async {
+    try {
+      await Hive.initFlutter();
+    } catch (e) {
+      debugPrint('Hive 초기화 중 오류 발생: $e');
+    }
     _storage = EventStorage();
     _sync = EventSync(_serverUrl);
     _loadEvents();
