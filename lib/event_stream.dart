@@ -112,6 +112,7 @@ class EventStream with WidgetsBindingObserver {
       debugPrint('성공적으로 ${batch.length}개의 이벤트를 동기화했습니다');
     } else {
       debugPrint('이벤트 동기화에 실패했습니다');
+      _streamQueue.addLast(batch);
     }
 
     _isSyncingEvents = false;
