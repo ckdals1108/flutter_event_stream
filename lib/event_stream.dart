@@ -87,10 +87,11 @@ class EventStream with WidgetsBindingObserver {
       _streamQueue.addLast(batchEvents);
       // 이벤트 스트림 상태를 배치 생성 완료로 변경
       _isSlicingEvents = false;
-      // 배치 이벤트 리스트를 서버에 동기화
-      if (!_isSyncingEvents) {
-        _syncEvents();
-      }
+    }
+
+    // 배치 이벤트 리스트 서버 동기화
+    if (!_isSyncingEvents) {
+      _syncEvents();
     }
   }
 
