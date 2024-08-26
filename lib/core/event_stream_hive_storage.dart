@@ -27,4 +27,22 @@ class HiveEventStorage implements EventStorageInterface {
     final box = await Hive.openBox<EventModel>(_boxName);
     await box.deleteAll(ids);
   }
+
+  @override
+  Future<void> getUser() {
+    // TODO: implement getUser
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<void> removeUser() {
+    // TODO: implement removeUser
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<void> setUser({required String id, required String deviceId}) {
+    // TODO: implement setUser
+    throw UnimplementedError();
+  }
 }
