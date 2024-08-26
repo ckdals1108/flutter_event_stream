@@ -1,162 +1,112 @@
 library event_stream;
 
-import 'dart:collection';
-import 'dart:convert';
+import 'dart:async';
 
+import 'package:event_stream/core/event_life_cycle.dart';
+import 'package:event_stream/core/event_stream_hive_storage.dart';
+import 'package:event_stream/core/event_sync.dart';
+import 'package:event_stream/interface/event_stroage_interface.dart';
 import 'package:event_stream/model/event_model.dart';
-import 'package:flutter/widgets.dart';
-import 'package:hive/hive.dart';
-import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart';
+import 'package:rxdart/rxdart.dart';
 import 'package:uuid/uuid.dart';
 
-class EventStream with WidgetsBindingObserver {
-  static final EventStream _instance = EventStream._internal();
+abstract class EventStreamInterface {
+  void track({
+    required String name,
+    required Map<String, dynamic> properties,
+  });
+}
+
+class EventStream implements EventStreamInterface {
+  static EventStream? _instance;
+  late final int _batchSize;
+  late final String _serverUrl;
+  late final EventStorageInterface _storage;
+  late final EventSync _sync;
+  late final EventLifeCycle _eventLifeCycle;
 
   factory EventStream({
     required String serverUrl,
-    int batchSize = 30,
+    int batchSize = 10,
   }) {
-    _instance._serverUrl = serverUrl;
-    _instance._batchSize = batchSize;
-    _instance._init();
-    return _instance;
+    return _instance ??= EventStream._internal(serverUrl, batchSize);
   }
 
-  EventStream._internal();
+  EventStream._internal(String serverUrl, int batchSize) {
+    _serverUrl = serverUrl;
+    _batchSize = batchSize;
+    _init();
+  }
 
-  late final EventStorage _storage;
-  late final EventSync _sync;
-  late final int _batchSize;
-  late final String _serverUrl;
-  bool _isSlicingEvents = false;
-  bool _isSyncingEvents = false;
-  // 이벤트 임시 저장용 큐
-  final Queue<EventModel> _eventQueue = Queue<EventModel>();
-  // 이벤트 서버 통신용 큐
-  final Queue<List<EventModel>> _streamQueue = Queue<List<EventModel>>();
+  final _eventController = StreamController<EventModel>();
+  late final Stream<List<EventModel>> _batchStream;
 
-  void _init() {
-    _storage = EventStorage();
+  void _init() async {
+    _storage = HiveEventStorage();
     _sync = EventSync(_serverUrl);
-    _loadEvents();
+    _eventLifeCycle = EventLifeCycle(saveEvents: _saveEvents);
+
+    // 스토리지 초기화
+    await _storage.init();
+    // 이벤트 로드
+    await _loadEvents();
+
+    // 이벤트 배치 처리 스트림 생성
+    _batchStream =
+        _eventController.stream.bufferCount(_batchSize).asyncMap((batch) async {
+      await _processEventBatch(batch);
+      return batch;
+    });
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) async {
-    if (state == AppLifecycleState.resumed) {
-      if (_eventQueue.isEmpty) {
-        _loadEvents();
-      }
-    } else if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.detached ||
-        state == AppLifecycleState.hidden) {
-      for (final events in _streamQueue) {
-        await _storage.saveEvent(events);
-      }
-      await _storage.saveEvent(_eventQueue.toList());
-      _streamQueue.clear();
-      _eventQueue.clear();
-    }
-  }
-
   void track({
     required String name,
     required Map<String, dynamic> properties,
   }) {
-    // 이벤트 생성
     final event = EventModel(
       id: const Uuid().v4(),
       name: name,
       properties: properties,
       createdAt: DateTime.now(),
     );
-    // 이벤트 큐에 추가
-    _eventQueue.addLast(event);
-    // 이벤트 큐가 배치 사이즈 이상이면 이벤트 배치 생성
-    if (!_isSlicingEvents && _eventQueue.length >= _batchSize) {
-      // 이벤트 스트림 상태를 배치 생성 중으로 변경
-      _isSlicingEvents = true;
-      // 배치 생성
-      final List<EventModel> batchEvents = [];
-      for (int i = 0; i < _batchSize; i++) {
-        final event = _eventQueue.removeFirst();
-        batchEvents.add(event);
-      }
-      // 배치 이벤트 리스트를 스트림 큐에 추가
-      _streamQueue.addLast(batchEvents);
-      // 이벤트 스트림 상태를 배치 생성 완료로 변경
-      _isSlicingEvents = false;
-    }
+    _eventController.sink.add(event);
+  }
 
-    // 배치 이벤트 리스트 서버 동기화
-    if (!_isSyncingEvents) {
-      _syncEvents();
+  Future<void> _processEventBatch(List<EventModel> batch) async {
+    try {
+      final success = await _sync.sendEvents(batch);
+      debugPrint('success: $success');
+      if (success != false) {
+        // 배치 처리 실패 시 이벤트를 스트림 맨 뒤로 보냄
+        for (var event in batch) {
+          _eventController.sink.add(event);
+        }
+      }
+    } catch (e) {
+      debugPrint('배치 처리 중 오류 발생: $e');
+      // 예외 발생 시에도 이벤트를 스트림 맨 뒤로 보냄
+      for (var event in batch) {
+        _eventController.sink.add(event);
+      }
     }
   }
 
   Future<void> _loadEvents() async {
     final events = await _storage.getEvents();
-    _eventQueue.addAll(events);
-  }
-
-  Future<void> _syncEvents() async {
-    if (_streamQueue.isEmpty || _isSyncingEvents) return;
-
-    _isSyncingEvents = true;
-
-    final batch = _streamQueue.first;
-    final success = await _sync.sendEvents(batch);
-
-    if (success) {
-      _streamQueue.removeFirst();
-      debugPrint('성공적으로 ${batch.length}개의 이벤트를 동기화했습니다');
-    } else {
-      debugPrint('이벤트 동기화에 실패했습니다');
-      _streamQueue.addLast(batch);
+    for (var event in events) {
+      _eventController.add(event);
     }
-
-    _isSyncingEvents = false;
-  }
-}
-
-class EventStorage {
-  static const String _boxName = 'events';
-
-  Future<void> saveEvent(List<EventModel> events) async {
-    final box = await Hive.openBox<EventModel>(_boxName);
-    await box.addAll(events);
   }
 
-  Future<List<EventModel>> getEvents() async {
-    final box = await Hive.openBox<EventModel>(_boxName);
-    return box.values.toList();
+  Future<void> _saveEvents() async {
+    final events = await _batchStream.expand((batch) => batch).toList();
+    await _storage.saveEvents(events);
   }
 
-  Future<void> removeEvents(List<String> ids) async {
-    final box = await Hive.openBox<EventModel>(_boxName);
-    await box.deleteAll(ids);
-  }
-}
-
-class EventSync {
-  final String _serverUrl;
-  final http.Client _client;
-
-  EventSync(this._serverUrl, {http.Client? client})
-      : _client = client ?? http.Client();
-
-  Future<bool> sendEvents(List<EventModel> events) async {
-    try {
-      final response = await _client.post(
-        Uri.parse(_serverUrl),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(events.map((e) => e.toJson()).toList()),
-      );
-      return response.statusCode == 200;
-    } catch (e) {
-      debugPrint('이벤트 전송 중 오류 발생: $e');
-      return false;
-    }
+  void dispose() {
+    _eventController.close();
+    _eventLifeCycle.dispose();
   }
 }
